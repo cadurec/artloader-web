@@ -2,16 +2,8 @@ import { NextResponse } from "next/server";
 import https from "https";
 import { exec } from "child_process";
 import { promisify } from "util";
-import { chromium } from "playwright";
 
 const execAsync = promisify(exec);
-
-const HEADERS = {
-  "accept": "*/*",
-  "origin": "https://artlist.io",
-  "referer": "https://artlist.io/",
-  "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-};
 
 function parseMediaFromHtml(text: string, defaultTitle: string) {
   let title = defaultTitle;
@@ -21,24 +13,37 @@ function parseMediaFromHtml(text: string, defaultTitle: string) {
     if (rawTitle) title = rawTitle;
   }
 
-  const mediaMatch = text.match(/(https:\/\/[^"'\s]+\.(?:m3u8|aac|mp3))/);
+  // Busca links diretos visíveis
+  const mediaMatch = text.match(/(https:\/\/[^"'\s]+\.(?:m3u8|aac|mp3|mp4))/);
   if (mediaMatch) {
     const foundUrl = mediaMatch[0];
-    return { type: foundUrl.includes(".m3u8") ? "footage" : "music", url: foundUrl, title };
+    const isFootage = foundUrl.includes(".m3u8") || foundUrl.includes(".mp4");
+    return { type: isFootage ? "footage" : "music", url: foundUrl, title };
   }
 
+  // Busca links ocultos em Base64 (Músicas e Vídeos que começam com 'content/')
   const b64Matches = text.match(/Y29udGVudC9[a-zA-Z0-9+=/]+/g);
   if (b64Matches && b64Matches.length > 0) {
     for (const b64 of Array.from(new Set(b64Matches))) {
       try {
         const decoded = Buffer.from(b64, 'base64').toString('utf-8');
-        if (decoded.includes('.aac') || decoded.includes('.mp3')) {
+        if (decoded.includes('.aac') || decoded.includes('.mp3') || decoded.includes('.m3u8') || decoded.includes('.mp4')) {
           const foundUrl = `https://cms-public-artifacts.artlist.io/${decoded}`;
-          return { type: "music", url: foundUrl, title };
+          const isFootage = decoded.includes('.m3u8') || decoded.includes('.mp4');
+          return { type: isFootage ? "footage" : "music", url: foundUrl, title };
         }
       } catch (err) {}
     }
   }
+
+  // Tenta buscar por caminhos parciais do CDN no formato JSON escapado
+  const cdnMatch = text.match(/cms-public-artifacts\.artlist\.io[^\s"'\\]+?\.(?:aac|mp3|m3u8|mp4)/i);
+  if (cdnMatch) {
+    const foundUrl = `https://${cdnMatch[0].replace(/\\u002F/g, "/").replace(/\\\//g, "/")}`;
+    const isFootage = foundUrl.includes(".m3u8") || foundUrl.includes(".mp4");
+    return { type: isFootage ? "footage" : "music", url: foundUrl, title };
+  }
+
   return null;
 }
 
@@ -63,13 +68,11 @@ export async function POST(req: Request) {
       }
     } catch (e) {}
 
-    if (url.includes(".m3u8") || url.includes(".aac") || url.includes(".mp3")) {
-       return NextResponse.json({ type: url.includes(".m3u8") ? "footage" : "music", url, title });
+    if (url.includes(".m3u8") || url.includes(".aac") || url.includes(".mp3") || url.includes(".mp4")) {
+       const isFootage = url.includes(".m3u8") || url.includes(".mp4");
+       return NextResponse.json({ type: isFootage ? "footage" : "music", url, title });
     }
 
-    const isAudio = url.includes("/song/") || url.includes("/royalty-free-music/") || url.includes("/sfx/") || url.includes("/track/");
-
-    // TENTATIVA 1: Busca Rápida Estática (Funciona instantaneamente no Localhost)
     let htmlText = "";
     try {
       htmlText = await new Promise<string>((resolve, reject) => {
@@ -78,7 +81,8 @@ export async function POST(req: Request) {
           hostname: parsedUrl.hostname,
           path: parsedUrl.pathname + parsedUrl.search,
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+            'Accept-Language': 'en-US,en;q=0.9'
           }
         }, (res) => {
           let data = '';
@@ -94,9 +98,11 @@ export async function POST(req: Request) {
       });
     } catch (e) {}
 
+    // Fallback com curl avançado simulando requisição completa para maximizar bypass de proteção no Render
     if (!htmlText || htmlText.length < 80000) {
       try {
-        const { stdout } = await execAsync(`curl -s -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" "${url}"`);
+        const curlCmd = `curl -s -A "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1" -H "Accept-Language: en-US,en;q=0.9" --compressed "${url}"`;
+        const { stdout } = await execAsync(curlCmd);
         if (stdout) htmlText = stdout;
       } catch (e) {}
     }
@@ -106,87 +112,12 @@ export async function POST(req: Request) {
       if (result) return NextResponse.json(result);
     }
 
-    // TENTATIVA 2: Fallback Robusto com Navegador (Essencial para Vídeos e para contornar Cloudflare no Render)
-    let browser;
-    try {
-      browser = await chromium.launch({
-        headless: true,
-        args: [
-          "--autoplay-policy=no-user-gesture-required",
-          "--disable-blink-features=AutomationControlled",
-          "--no-sandbox",
-          "--disable-dev-shm-usage",
-          "--disable-gpu",
-          "--single-process"
-        ]
-      });
-    } catch (err: any) {
-      return NextResponse.json({ error: `Navegador falhou: ${err.message}` }, { status: 500 });
-    }
-
-    try {
-      const context = await browser.newContext({ userAgent: HEADERS["user-agent"], viewport: { width: 1280, height: 800 } });
-      await context.addInitScript("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });");
-      const page = await context.newPage();
-
-      const interceptPromise = new Promise<string>((resolve) => {
-        page.on("response", async (res) => {
-          try {
-            // Analisa respostas HTML dinâmicas passando pelo Cloudflare
-            if (res.url().includes(url.split('/').pop()!)) {
-              const text = await res.text();
-              const parsed = parseMediaFromHtml(text, title);
-              if (parsed && parsed.url) {
-                resolve(parsed.url);
-              }
-            }
-
-            // Interceptação direta de rede para m3u8 (vídeos) ou áudio direto
-            if (isAudio && res.url().match(/\.(aac|mp3)$/)) resolve(res.url());
-            if (!isAudio && res.url().includes(".m3u8")) resolve(res.url());
-          } catch (e) {}
-        });
-
-        page.on("request", (req) => {
-          if (isAudio && req.url().match(/\.(aac|mp3)$/)) resolve(req.url());
-          if (!isAudio && req.url().includes(".m3u8")) resolve(req.url());
-        });
-      });
-
-      page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
-
-      if (isAudio) {
-        page.waitForSelector('button:has-text("Play"), button[aria-label*="Play"], [data-testid*="play"]', { timeout: 10000 }).then(async () => {
-          await page.click('button:has-text("Play"), button[aria-label*="Play"], [data-testid*="play"]');
-        }).catch(() => {});
-      }
-
-      const finalUrl = await Promise.race([
-        interceptPromise,
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 45000))
-      ]);
-
-      try {
-        const pTitle = await page.title();
-        if (pTitle) {
-          const cleanPTitle = pTitle.split(" - ")[0].split(" | ")[0].trim();
-          if (cleanPTitle) title = cleanPTitle;
-        }
-      } catch (e) {}
-
-      if (finalUrl) {
-        return NextResponse.json({ type: isAudio ? "music" : "footage", url: finalUrl, title });
-      }
-
-    } finally {
-      await browser.close();
-    }
-
-    return NextResponse.json({ error: "Mídia não encontrada. Verifique se o link está correto e acessível." }, { status: 404 });
+    return NextResponse.json({ error: "Mídia não encontrada no código-fonte estático. Verifique o link." }, { status: 404 });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
+
 
 
 
