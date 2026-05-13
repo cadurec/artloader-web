@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { toBlobURL } from "@ffmpeg/util";
-import { Plus, Trash2, Download, Loader2, CheckCircle, AlertCircle, Play } from "lucide-react";
+import { Plus, Trash2, Download, Loader2, CheckCircle, AlertCircle, Play, Sparkles, RefreshCw } from "lucide-react";
 
 interface BatchItem {
   id: string;
@@ -23,7 +23,7 @@ export default function Home() {
     { id: "1", url: "", status: "idle" }
   ]);
   const [globalMusicFormat, setGlobalMusicFormat] = useState<"mp3" | "wav" | "original">("mp3");
-  const [isBatchProcessing, setIsBatchProcessing] = useState(false);
+  const [uiStep, setUiStep] = useState<"links" | "format" | "processing" | "done">("links");
 
   const ffmpegRef = useRef<any>(null);
   const [isFfmpegLoaded, setIsFfmpegLoaded] = useState(false);
@@ -62,7 +62,6 @@ export default function Home() {
     if (items.length === 1) {
       setItems([{ id: "1", url: "", status: "idle" }]);
     } else {
-      // Revoga URL de download se existir para liberar memória
       const item = items.find(it => it.id === id);
       if (item?.downloadUrl) URL.revokeObjectURL(item.downloadUrl);
       setItems(prev => prev.filter(it => it.id !== id));
@@ -73,11 +72,36 @@ export default function Home() {
     setItems(prev => prev.map(item => item.id === id ? { ...item, url: newUrl } : item));
   };
 
-  const startBatchProcess = async () => {
+  const resetAll = () => {
+    items.forEach(it => {
+      if (it.downloadUrl) URL.revokeObjectURL(it.downloadUrl);
+    });
+    setItems([{ id: "1", url: "", status: "idle" }]);
+    setUiStep("links");
+  };
+
+  const handleTriggerFormatSelection = () => {
     const validItems = items.filter(item => item.url.trim() !== "");
     if (validItems.length === 0) return;
+    setUiStep("format");
+  };
 
-    setIsBatchProcessing(true);
+  const handleSelectFormatAndStart = (fmt: "mp3" | "wav" | "original") => {
+    setGlobalMusicFormat(fmt);
+    setUiStep("processing");
+    // Pequeno delay para o React atualizar a interface visualmente antes do loop de processamento intenso
+    setTimeout(() => {
+      startBatchProcess(fmt);
+    }, 50);
+  };
+
+  const startBatchProcess = async (fmt: "mp3" | "wav" | "original") => {
+    const validItems = items.filter(item => item.url.trim() !== "");
+    if (validItems.length === 0) {
+      setUiStep("links");
+      return;
+    }
+
     const ffmpeg = ffmpegRef.current;
     if (!isFfmpegLoaded) {
       await loadFfmpeg();
@@ -96,7 +120,6 @@ export default function Home() {
     for (let i = 0; i < validItems.length; i++) {
       const currentItem = validItems[i];
       
-      // Se já foi concluído com sucesso antes, pula
       if (currentItem.status === "done") continue;
 
       setItems(prev => prev.map(it => it.id === currentItem.id ? { 
@@ -148,11 +171,11 @@ export default function Home() {
           let outputFilename = "";
           let finalExt = "";
 
-          if (globalMusicFormat === "mp3") {
+          if (fmt === "mp3") {
             outputFilename = `output_${i}.mp3`;
             finalExt = "mp3";
             await ffmpeg.exec(["-i", inputName, "-b:a", "320k", outputFilename]);
-          } else if (globalMusicFormat === "wav") {
+          } else if (fmt === "wav") {
             outputFilename = `output_${i}.wav`;
             finalExt = "wav";
             await ffmpeg.exec(["-i", inputName, outputFilename]);
@@ -295,7 +318,22 @@ export default function Home() {
       }
     }
 
-    setIsBatchProcessing(false);
+    setUiStep("done");
+  };
+
+  const downloadAllFinished = () => {
+    const doneItems = items.filter(it => it.status === "done" && it.downloadUrl);
+    doneItems.forEach((item, index) => {
+      // Pequeno intervalo entre downloads para não disparar bloqueador de pop-up do Chrome/Safari
+      setTimeout(() => {
+        const a = document.createElement("a");
+        a.href = item.downloadUrl!;
+        a.download = item.filename || "download";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }, index * 400);
+    });
   };
 
   const hasLinks = items.some(it => it.url.trim() !== "");
@@ -315,41 +353,17 @@ export default function Home() {
         </p>
       </div>
 
-      {/* CONTROLS & BATCH PANEL */}
+      {/* BATCH PANEL */}
       <div className="border border-[#222] bg-[#111] p-5 md:p-8 w-full max-w-4xl shadow-2xl rounded-sm">
         
-        {/* GLOBAL OPTIONS BAR */}
-        <div className="mb-8 p-4 bg-[#0d0d0d] border border-[#222] flex flex-col md:flex-row items-center justify-between gap-4">
-          <div>
-            <span className="block text-gray-400 font-mono text-[11px] uppercase tracking-wider mb-1">
-              Formato Global de Saída (Músicas)
-            </span>
-            <p className="text-[#555] text-[10px] font-mono">Vídeos sempre saem em MP4 com Qualidade Máxima Original</p>
-          </div>
-          
-          <div className="flex gap-2">
-            {(["mp3", "wav", "original"] as const).map(fmt => (
-              <button
-                key={fmt}
-                onClick={() => setGlobalMusicFormat(fmt)}
-                className={`px-4 py-2 font-mono text-xs uppercase tracking-widest transition-all border ${
-                  globalMusicFormat === fmt
-                    ? "border-[#dfff00] bg-[#dfff00]/10 text-[#dfff00]"
-                    : "border-[#333] text-gray-500 hover:border-[#555] hover:text-gray-300"
-                }`}
-              >
-                {fmt === "original" ? "AAC Original" : fmt}
-              </button>
-            ))}
-          </div>
-        </div>
-
         {/* LINKS LIST */}
         <div className="space-y-4 mb-8">
           <div className="flex items-center justify-between border-b border-[#222] pb-3 px-1">
-            <span className="text-[#555] font-mono text-xs uppercase tracking-widest">Lista de Mídias ({items.length})</span>
+            <span className="text-[#555] font-mono text-xs uppercase tracking-widest">
+              Lista de Mídias ({items.length}) {globalMusicFormat && uiStep !== "links" && `· Áudio: ${globalMusicFormat.toUpperCase()}`}
+            </span>
             <button 
-              onClick={() => setItems([{ id: "1", url: "", status: "idle" }])}
+              onClick={resetAll}
               className="text-[#555] hover:text-red-400 font-mono text-[10px] uppercase tracking-widest transition-colors"
             >
               [ Limpar Tudo ]
@@ -379,7 +393,7 @@ export default function Home() {
                   value={item.url}
                   onChange={(e) => updateUrl(item.id, e.target.value)}
                   placeholder="Cole a URL do Artlist aqui (música, SFX ou vídeo)..."
-                  disabled={isBatchProcessing && item.status !== "idle" && item.status !== "error"}
+                  disabled={uiStep === "processing" && item.status !== "idle" && item.status !== "error"}
                   className="flex-1 bg-[#050505] border border-[#222] focus:border-[#dfff00] text-gray-300 font-mono text-xs px-4 py-3 outline-none transition-colors disabled:opacity-50"
                 />
 
@@ -396,7 +410,7 @@ export default function Home() {
 
                   <button
                     onClick={() => removeLinkBox(item.id)}
-                    disabled={isBatchProcessing && item.status !== "idle" && item.status !== "error"}
+                    disabled={uiStep === "processing" && item.status !== "idle" && item.status !== "error"}
                     title="Deletar Link"
                     className="p-3 bg-[#161616] border border-[#222] hover:border-red-500 hover:text-red-400 text-[#555] transition-colors disabled:opacity-50"
                   >
@@ -445,37 +459,80 @@ export default function Home() {
           ))}
         </div>
 
-        {/* BOTTOM GLOBAL BUTTONS */}
-        <div className="flex flex-col md:flex-row gap-4 pt-4 border-t border-[#222]">
-          <button
-            onClick={addLinkBox}
-            disabled={isBatchProcessing}
-            className="flex-1 py-4 border border-[#333] hover:border-[#dfff00] bg-[#0a0a0a] text-gray-400 hover:text-[#dfff00] font-mono text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-all disabled:opacity-50"
-          >
-            <Plus size={16} /> Adicionar Mais Link
-          </button>
+        {/* BOTTOM DYNAMIC ACTION CONTROLS */}
+        <div className="pt-4 border-t border-[#222]">
+          {uiStep === "links" && (
+            <div className="flex flex-col md:flex-row gap-4 animate-in fade-in duration-200">
+              <button
+                onClick={addLinkBox}
+                className="flex-1 py-4 border border-[#333] hover:border-[#dfff00] bg-[#0a0a0a] text-gray-400 hover:text-[#dfff00] font-mono text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-all"
+              >
+                <Plus size={16} /> Adicionar Mais Link
+              </button>
 
-          <button
-            onClick={startBatchProcess}
-            disabled={!hasLinks || isBatchProcessing}
-            className={`flex-1 py-4 font-bold font-mono text-xs uppercase tracking-widest flex items-center justify-center gap-3 transition-all shadow-xl ${
-              !hasLinks
-                ? "bg-[#1a1a1a] text-[#444] border border-[#222] cursor-not-allowed"
-                : isBatchProcessing
-                ? "bg-[#dfff00]/30 text-[#dfff00] cursor-wait border border-[#dfff00]"
-                : "bg-[#dfff00] text-black hover:bg-[#bfff00]"
-            }`}
-          >
-            {isBatchProcessing ? (
-              <>
-                <Loader2 size={16} className="animate-spin" /> Processando Fila...
-              </>
-            ) : (
-              <>
-                <Play size={16} fill="currentColor" /> Processar e Baixar Todos
-              </>
-            )}
-          </button>
+              <button
+                onClick={handleTriggerFormatSelection}
+                disabled={!hasLinks}
+                className={`flex-1 py-4 font-bold font-mono text-xs uppercase tracking-widest flex items-center justify-center gap-3 transition-all shadow-xl ${
+                  !hasLinks
+                    ? "bg-[#1a1a1a] text-[#444] border border-[#222] cursor-not-allowed"
+                    : "bg-[#dfff00] text-black hover:bg-[#bfff00]"
+                }`}
+              >
+                <Sparkles size={16} fill="currentColor" /> Processar Mídias
+              </button>
+            </div>
+          )}
+
+          {uiStep === "format" && (
+            <div className="p-5 border border-[#dfff00]/30 bg-[#dfff00]/5 rounded-sm text-center animate-in fade-in zoom-in-95 duration-200">
+              <p className="text-[#dfff00] font-mono text-xs uppercase tracking-wider mb-4">
+                ⚡ Selecione o formato de conversão para as Músicas da lista:
+              </p>
+              
+              <div className="flex flex-wrap justify-center gap-3">
+                {(["mp3", "wav", "original"] as const).map(fmt => (
+                  <button
+                    key={fmt}
+                    onClick={() => handleSelectFormatAndStart(fmt)}
+                    className="px-6 py-3 bg-[#0a0a0a] border border-[#333] hover:border-[#dfff00] hover:text-[#dfff00] font-mono text-xs uppercase tracking-widest text-gray-300 transition-all flex items-center gap-2"
+                  >
+                    {fmt === "original" ? "AAC Original" : fmt}
+                  </button>
+                ))}
+              </div>
+
+              <p className="text-[#666] font-mono text-[10px] mt-4">
+                Vídeos da lista serão extraídos na Qualidade Máxima Original automaticamente
+              </p>
+            </div>
+          )}
+
+          {uiStep === "processing" && (
+            <div className="py-4 bg-[#111] border border-[#222] text-center">
+              <button disabled className="w-full py-2 text-[#dfff00] font-mono text-xs uppercase tracking-widest inline-flex items-center justify-center gap-3 cursor-wait">
+                <Loader2 size={16} className="animate-spin" /> Transcodificando Lote em Andamento...
+              </button>
+            </div>
+          )}
+
+          {uiStep === "done" && (
+            <div className="flex flex-col md:flex-row gap-4 animate-in fade-in duration-300">
+              <button
+                onClick={downloadAllFinished}
+                className="flex-1 py-4 bg-[#dfff00] hover:bg-[#bfff00] text-black font-bold font-mono text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-all shadow-2xl"
+              >
+                <Download size={16} /> Baixar Todos os Arquivos
+              </button>
+
+              <button
+                onClick={resetAll}
+                className="px-8 py-4 border border-[#333] hover:border-[#555] bg-[#0a0a0a] text-gray-400 hover:text-white font-mono text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-all"
+              >
+                <RefreshCw size={14} /> Novo Lote
+              </button>
+            </div>
+          )}
         </div>
 
       </div>
