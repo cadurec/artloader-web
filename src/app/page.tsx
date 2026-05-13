@@ -83,7 +83,24 @@ export default function Home() {
   const handleTriggerFormatSelection = () => {
     const validItems = items.filter(item => item.url.trim() !== "");
     if (validItems.length === 0) return;
-    setUiStep("format");
+
+    // Inspeciona de forma inteligente se há algum link que possa ser de música/sfx
+    const hasAudioLink = validItems.some(it => {
+      const u = it.url.toLowerCase();
+      // Consideramos áudio se a URL tiver /song/, /sfx/, /royalty-free-music/, /sound-effects/ ou se NÃO tiver indícios claros de vídeo
+      const isClearlyVideo = u.includes("/stock-footage/") || u.includes("/video/") || u.includes("/clip/");
+      return !isClearlyVideo;
+    });
+
+    if (hasAudioLink) {
+      setUiStep("format");
+    } else {
+      // Se a lista só tem vídeos, pula a pergunta de formato de áudio e vai direto para a transcodificação!
+      setUiStep("processing");
+      setTimeout(() => {
+        startBatchProcess("mp3"); // formato default inofensivo para vídeos
+      }, 50);
+    }
   };
 
   const handleSelectFormatAndStart = (fmt: "mp3" | "wav" | "original") => {
