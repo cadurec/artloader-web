@@ -68,11 +68,14 @@ export async function POST(req: Request) {
         args: [
           "--autoplay-policy=no-user-gesture-required",
           "--disable-blink-features=AutomationControlled",
-          "--no-sandbox"
+          "--no-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-gpu",
+          "--single-process"
         ]
       });
-    } catch (err) {
-      return NextResponse.json({ error: "O link direto não pôde ser lido. O servidor em nuvem não conseguiu inicializar o navegador de simulação." }, { status: 500 });
+    } catch (err: any) {
+      return NextResponse.json({ error: `Navegador falhou: ${err.message}` }, { status: 500 });
     }
 
     try {
