@@ -88,40 +88,35 @@ export async function POST(req: Request) {
     }
 
     let htmlText = "";
-    try {
-      htmlText = await new Promise<string>((resolve, reject) => {
-        const parsedUrl = new URL(url);
-        const request = https.get({
-          hostname: parsedUrl.hostname,
-          path: parsedUrl.pathname + parsedUrl.search,
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
-            'Accept-Language': 'en-US,en;q=0.9'
-          }
-        }, (res) => {
-          let data = '';
-          res.on('data', chunk => data += chunk);
-          res.on('end', () => resolve(data));
-        });
-        
-        request.on('error', reject);
-        request.setTimeout(2500, () => {
-          request.destroy();
-          reject(new Error("Timeout"));
-        });
-      });
-    } catch (e) {}
-
-    // Fallback 1: curl nativo avançado
-    if (!htmlText || htmlText.length < 80000) {
+    
+    // No localhost (desenvolvimento), tenta a busca local estática grátis primeiro porque não consome seus créditos
+    if (process.env.NODE_ENV === "development") {
       try {
-        const curlCmd = `curl -s -A "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1" -H "Accept-Language: en-US,en;q=0.9" --compressed "${url}"`;
-        const { stdout } = await execAsync(curlCmd);
-        if (stdout) htmlText = stdout;
+        htmlText = await new Promise<string>((resolve, reject) => {
+          const parsedUrl = new URL(url);
+          const request = https.get({
+            hostname: parsedUrl.hostname,
+            path: parsedUrl.pathname + parsedUrl.search,
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+              'Accept-Language': 'en-US,en;q=0.9'
+            }
+          }, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => resolve(data));
+          });
+          
+          request.on('error', reject);
+          request.setTimeout(2000, () => {
+            request.destroy();
+            reject(new Error("Timeout"));
+          });
+        });
       } catch (e) {}
     }
 
-    // Fallback 2 Máximo: Oxylabs Web Scraper API (Garante acesso ao HTML estático contornando o Cloudflare no Render)
+    // Em Produção no Render, PULA DIRETO PRA API DO OXYLABS NO MILISSEGUNDO ZERO! Sem espera!
     if (!htmlText || htmlText.length < 80000) {
       try {
         const oxyAuth = Buffer.from("cadurec_Nc4pf:+Caduocara33").toString("base64");
