@@ -58,6 +58,20 @@ function parseMediaFromHtml(text: string, defaultTitle: string) {
     return { type: "footage", url: clean, title };
   }
 
+  // Busca super abrangente para músicas/áudio: qualquer menção a .mp3 ou .aac
+  const broadAudioMatch = text.match(/[a-zA-Z0-9_.\-/\\:]+?\.(?:mp3|aac)/i);
+  if (broadAudioMatch) {
+    let clean = broadAudioMatch[0].replace(/\\u002F/g, "/").replace(/\\\//g, "/").replace(/\\/g, "");
+    if (!clean.startsWith("http")) {
+      clean = clean.replace(/^\/+/, "");
+      if (!clean.includes("content/")) {
+        clean = `content/${clean}`;
+      }
+      clean = `https://cms-public-artifacts.artlist.io/${clean}`;
+    }
+    return { type: "music", url: clean, title };
+  }
+
   return null;
 }
 
@@ -88,12 +102,14 @@ export async function POST(req: Request) {
     }
 
     let extractedMedia: any = null;
+    let fastOk = false;
+    let htmlLen = 0;
+    let oxyStatus = 0;
     
     // 1. TENTATIVA DIRETA ULTRA RÁPIDA (Vercel / Localhost):
-    // Faz um fetch limpo de altíssima velocidade fingindo ser um navegador real. Se o Cloudflare deixar passar, a resposta vem em 200 a 300 milissegundos!
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2000); // Desiste rapidamente em 2 segundos para não prender a fila
+      const timeoutId = setTimeout(() => controller.abort(), 2000);
       
       const fastRes = await fetch(url, {
         headers: {
@@ -105,9 +121,10 @@ export async function POST(req: Request) {
       });
       clearTimeout(timeoutId);
 
+      fastOk = fastRes.ok;
       if (fastRes.ok) {
         const text = await fastRes.text();
-        // Garante que o texto retornado é o site real do Artlist e não uma página de desafio/bloqueio do Cloudflare
+        htmlLen = text.length;
         if (!text.includes("Just a moment...") && !text.includes("cf-turnstile") && text.includes("artlist")) {
           extractedMedia = parseMediaFromHtml(text, title);
           if (extractedMedia) {
@@ -118,7 +135,6 @@ export async function POST(req: Request) {
     } catch (e) {}
 
     // 2. PLANO B DE EMERGÊNCIA (API Oxylabs):
-    // Só entra se a tentativa direta da Vercel foi interceptada pelo Cloudflare ou não revelou a mídia real
     if (!extractedMedia) {
       try {
         const authStr = process.env.OXYLABS_AUTH || "cadurec_Nc4pf:tT5WJ56H6mXfD28";
@@ -135,9 +151,11 @@ export async function POST(req: Request) {
           })
         });
         
+        oxyStatus = oxyRes.status;
         if (oxyRes.ok) {
           const oxyData = await oxyRes.json();
           if (oxyData.results && oxyData.results[0] && oxyData.results[0].content) {
+            htmlLen = oxyData.results[0].content.length;
             extractedMedia = parseMediaFromHtml(oxyData.results[0].content, title);
             if (extractedMedia) {
               return NextResponse.json(extractedMedia);
@@ -147,7 +165,9 @@ export async function POST(req: Request) {
       } catch (e) {}
     }
 
-    return NextResponse.json({ error: "Mídia não encontrada no código-fonte estático. Verifique o link." }, { status: 404 });
+    return NextResponse.json({ 
+      error: `Mídia não encontrada. (Debug: FastOk=${fastOk}, Len=${htmlLen}, OxyStatus=${oxyStatus})` 
+    }, { status: 404 });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
