@@ -354,6 +354,12 @@ export default function Home() {
   };
 
   const hasLinks = items.some(it => it.url.trim() !== "");
+  const hasAudioLink = items.some(it => {
+    if (it.type === "music") return true;
+    const u = it.url.toLowerCase();
+    const isClearlyVideo = u.includes("/stock-footage/") || u.includes("/video/") || u.includes("/clip/");
+    return !isClearlyVideo && it.url.trim() !== "";
+  });
 
   return (
     <main className="min-h-screen bg-[#0a0a0a] flex flex-col items-center justify-start p-4 md:p-8 selection:bg-[#dfff00] selection:text-black">
@@ -377,7 +383,7 @@ export default function Home() {
         <div className="space-y-4 mb-8">
           <div className="flex items-center justify-between border-b border-[#222] pb-3 px-1">
             <span className="text-[#555] font-mono text-xs uppercase tracking-widest">
-              Lista de Mídias ({items.length}) {globalMusicFormat && uiStep !== "links" && `· Áudio: ${globalMusicFormat.toUpperCase()}`}
+              Lista de Mídias ({items.length}) {hasAudioLink && globalMusicFormat && uiStep !== "links" && `· Áudio: ${globalMusicFormat.toUpperCase()}`}
             </span>
             <button 
               onClick={resetAll}
