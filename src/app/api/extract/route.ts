@@ -72,7 +72,7 @@ export async function POST(req: Request) {
         ]
       });
     } catch (err) {
-      return NextResponse.json({ error: "O link não foi encontrado diretamente. O ambiente da Vercel não possui navegador para modo avançado." }, { status: 500 });
+      return NextResponse.json({ error: "O link direto não pôde ser lido. O servidor em nuvem não conseguiu inicializar o navegador de simulação." }, { status: 500 });
     }
 
     try {
