@@ -224,10 +224,13 @@ export default function Home() {
         
         await ffmpeg.writeFile("playlist.m3u8", localPlaylist);
         
-        // Apenas junta os pedaços (muxing) sem recodificar, mantendo a qualidade original 100% e sendo instantâneo.
+        // Apenas junta os pedaços (muxing) sem recodificar, mantendo a qualidade original 100%.
+        // Otimizamos também a indexação (faststart) e o cabeçalho de áudio para Premiere/Resolve.
         const ret = await ffmpeg.exec([
           "-i", "playlist.m3u8", 
           "-c", "copy", 
+          "-bsf:a", "aac_adtstoasc",
+          "-movflags", "+faststart",
           "output.mp4"
         ]);
         
