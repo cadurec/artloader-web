@@ -33,6 +33,15 @@ export default function Home() {
       ffmpegRef.current = new FFmpeg();
     }
     loadFfmpeg();
+
+    // Captura link injetado pela extensão caso disponível
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const injected = params.get("url");
+      if (injected) {
+        setItems([{ id: "injected_1", url: injected, status: "idle" }]);
+      }
+    }
   }, []);
 
   const loadFfmpeg = async () => {
