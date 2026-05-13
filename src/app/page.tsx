@@ -3,36 +3,32 @@
 import { useState, useRef, useEffect } from "react";
 import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { toBlobURL } from "@ffmpeg/util";
-import { Download, Loader2, Play, CheckCircle, AlertCircle, FileVideo, FileAudio } from "lucide-react";
+import { Plus, Trash2, Download, Loader2, CheckCircle, AlertCircle, Play } from "lucide-react";
 
-type AppState = "idle" | "extracting" | "selecting_quality" | "downloading" | "processing" | "done" | "error";
-
-interface Quality {
-  name: string;
+interface BatchItem {
+  id: string;
   url: string;
-  resolution?: string;
-  format?: "mp3" | "wav" | "original";
+  status: "idle" | "analyzing" | "downloading" | "processing" | "done" | "error";
+  title?: string;
+  type?: "music" | "footage";
+  downloadUrl?: string;
+  filename?: string;
+  error?: string;
+  progressText?: string;
+  progressPercent?: number;
 }
 
 export default function Home() {
-  const [url, setUrl] = useState("");
-  const [appState, setAppState] = useState<AppState>("idle");
-  const [errorMsg, setErrorMsg] = useState("");
-  const [progressText, setProgressText] = useState("");
-  const [progressPercent, setProgressPercent] = useState(0);
-  
-  const [mediaType, setMediaType] = useState<"footage" | "music" | null>(null);
-  const [mediaTitle, setMediaTitle] = useState<string>("artlist_media");
-  const [qualities, setQualities] = useState<Quality[]>([]);
-  const [selectedQuality, setSelectedQuality] = useState<Quality | null>(null);
-  const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
-  const [downloadFilename, setDownloadFilename] = useState<string>("");
+  const [items, setItems] = useState<BatchItem[]>([
+    { id: "1", url: "", status: "idle" }
+  ]);
+  const [globalMusicFormat, setGlobalMusicFormat] = useState<"mp3" | "wav" | "original">("mp3");
+  const [isBatchProcessing, setIsBatchProcessing] = useState(false);
 
   const ffmpegRef = useRef<any>(null);
   const [isFfmpegLoaded, setIsFfmpegLoaded] = useState(false);
 
   useEffect(() => {
-    // Only instantiate FFmpeg on the client side
     if (!ffmpegRef.current) {
       ffmpegRef.current = new FFmpeg();
     }
@@ -46,10 +42,6 @@ export default function Home() {
       
       ffmpeg.on("log", ({ message }: { message: string }) => {
         console.log("[FFmpeg]", message);
-        if (message.includes("time=")) {
-           // Basic progress indication from logs
-           setProgressText(`Processando vídeo... (${message.split("time=")[1].split(" ")[0]})`);
-        }
       });
 
       await ffmpeg.load({
@@ -62,363 +54,435 @@ export default function Home() {
     }
   };
 
-  const handleExtract = async () => {
-    if (!url) return;
-    setAppState("extracting");
-    setErrorMsg("");
-    setProgressText("Analisando página e extraindo links ocultos...");
-    
-    try {
-      const res = await fetch("/api/extract", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
-      });
-      
-      const data = await res.json();
-      
-      if (!res.ok) {
-        throw new Error(data.error || "Falha na extração");
-      }
+  const addLinkBox = () => {
+    setItems(prev => [...prev, { id: Date.now().toString(), url: "", status: "idle" }]);
+  };
 
-      setMediaType(data.type);
-      if (data.title) setMediaTitle(data.title);
-      
-      if (data.type === "music") {
-        setQualities([
-          { name: "MP3 (320kbps Alta Qualidade)", url: data.url, format: "mp3" },
-          { name: "WAV (Sem Compressão / Lossless)", url: data.url, format: "wav" },
-          { name: "Áudio Original (AAC/Nativo)", url: data.url, format: "original" }
-        ]);
-        setAppState("selecting_quality");
-      } else {
-        // Fetch M3U8 and parse qualities
-        setProgressText("Lendo qualidades disponíveis...");
-        const m3u8Res = await fetch(`/api/proxy?url=${encodeURIComponent(data.url)}`);
-        if (!m3u8Res.ok) throw new Error("Não foi possível ler o arquivo de vídeo.");
-        
-        const m3u8Text = await m3u8Res.text();
-        const baseDir = data.url.replace(/[^/]+\.m3u8.*$/, "");
-        
-        const parsedQualities: Quality[] = [];
-        const lines = m3u8Text.split("\n");
-        
-        for (let i = 0; i < lines.length; i++) {
-          if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
-            const resMatch = lines[i].match(/RESOLUTION=(\d+x\d+)/);
-            let nextLine = lines[i+1]?.trim();
-            if (nextLine && !nextLine.startsWith("#")) {
-              const streamUrl = nextLine.startsWith("http") ? nextLine : baseDir + nextLine;
-              let name = resMatch ? resMatch[1] : "Vídeo";
-              
-              if (nextLine.includes("_1080p")) name = "1080p";
-              else if (nextLine.includes("_720p")) name = "720p";
-              else if (nextLine.includes("_2160p")) name = "4K";
-              else if (nextLine.includes("_480p")) name = "480p";
+  const removeLinkBox = (id: string) => {
+    if (items.length === 1) {
+      setItems([{ id: "1", url: "", status: "idle" }]);
+    } else {
+      // Revoga URL de download se existir para liberar memória
+      const item = items.find(it => it.id === id);
+      if (item?.downloadUrl) URL.revokeObjectURL(item.downloadUrl);
+      setItems(prev => prev.filter(it => it.id !== id));
+    }
+  };
 
-              parsedQualities.push({ name, url: streamUrl, resolution: resMatch?.[1] });
+  const updateUrl = (id: string, newUrl: string) => {
+    setItems(prev => prev.map(item => item.id === id ? { ...item, url: newUrl } : item));
+  };
+
+  const startBatchProcess = async () => {
+    const validItems = items.filter(item => item.url.trim() !== "");
+    if (validItems.length === 0) return;
+
+    setIsBatchProcessing(true);
+    const ffmpeg = ffmpegRef.current;
+    if (!isFfmpegLoaded) {
+      await loadFfmpeg();
+    }
+
+    // Estratégia de altíssima performance: Tenta baixar direto do CDN do Artlist no cliente para velocidade máxima gigabit
+    const fetchFast = async (targetUrl: string) => {
+      try {
+        const res = await fetch(targetUrl);
+        if (res.ok) return res;
+      } catch (e) {}
+      return await fetch(`/api/proxy?url=${encodeURIComponent(targetUrl)}`);
+    };
+
+    // Processa link por link para não derrubar a memória do navegador
+    for (let i = 0; i < validItems.length; i++) {
+      const currentItem = validItems[i];
+      
+      // Se já foi concluído com sucesso antes, pula
+      if (currentItem.status === "done") continue;
+
+      setItems(prev => prev.map(it => it.id === currentItem.id ? { 
+        ...it, 
+        status: "analyzing", 
+        progressText: "Analisando link via API...",
+        error: undefined 
+      } : it));
+
+      try {
+        const res = await fetch("/api/extract", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: currentItem.url.trim() }),
+        });
+        
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Mídia protegida ou não encontrada");
+        
+        const mediaTitle = data.title || `media_${i+1}`;
+        const mediaType = data.type;
+        
+        setItems(prev => prev.map(it => it.id === currentItem.id ? { 
+          ...it, 
+          title: mediaTitle, 
+          type: mediaType, 
+          status: "downloading", 
+          progressText: "Baixando mídia original em alta velocidade...", 
+          progressPercent: 0 
+        } : it));
+
+        if (mediaType === "music") {
+          // Processamento de Música com download otimizado
+          const proxyRes = await fetchFast(data.url);
+          if (!proxyRes.ok) throw new Error("Falha ao puxar arquivo de áudio");
+          const buffer = await proxyRes.arrayBuffer();
+          
+          setItems(prev => prev.map(it => it.id === currentItem.id ? { 
+            ...it, 
+            status: "processing", 
+            progressText: "Transcodificando áudio localmente..." 
+          } : it));
+
+          const extMatch = data.url.match(/\.([a-zA-Z0-9]+)(?:\?|$)/);
+          const originalExt = extMatch ? extMatch[1] : "aac";
+          const inputName = `input_${i}.${originalExt}`;
+          await ffmpeg.writeFile(inputName, new Uint8Array(buffer));
+          
+          let outputFilename = "";
+          let finalExt = "";
+
+          if (globalMusicFormat === "mp3") {
+            outputFilename = `output_${i}.mp3`;
+            finalExt = "mp3";
+            await ffmpeg.exec(["-i", inputName, "-b:a", "320k", outputFilename]);
+          } else if (globalMusicFormat === "wav") {
+            outputFilename = `output_${i}.wav`;
+            finalExt = "wav";
+            await ffmpeg.exec(["-i", inputName, outputFilename]);
+          } else {
+            outputFilename = `output_${i}.${originalExt}`;
+            finalExt = originalExt;
+            await ffmpeg.exec(["-i", inputName, "-c", "copy", outputFilename]);
+          }
+
+          const outputData = await ffmpeg.readFile(outputFilename);
+          const blob = new Blob([outputData as any], { type: "application/octet-stream" });
+          const dUrl = URL.createObjectURL(blob);
+          const fName = `${mediaTitle}.${finalExt}`;
+
+          setItems(prev => prev.map(it => it.id === currentItem.id ? { 
+            ...it, 
+            status: "done", 
+            downloadUrl: dUrl, 
+            filename: fName, 
+            progressText: "Pronto para salvar!" 
+          } : it));
+
+        } else {
+          // Processamento de Vídeo
+          setItems(prev => prev.map(it => it.id === currentItem.id ? { 
+            ...it, 
+            progressText: "Mapeando qualidades disponíveis do vídeo..." 
+          } : it));
+
+          const m3u8Res = await fetchFast(data.url);
+          if (!m3u8Res.ok) throw new Error("Falha ao ler o manifesto do vídeo");
+          const m3u8Text = await m3u8Res.text();
+          const baseDir = data.url.replace(/[^/]+\.m3u8.*$/, "");
+          
+          let highestQualityUrl = data.url;
+          const lines = m3u8Text.split("\n");
+          const streamUrls: string[] = [];
+          
+          for (let j = 0; j < lines.length; j++) {
+            if (lines[j].startsWith("#EXT-X-STREAM-INF")) {
+              const nextLine = lines[j+1]?.trim();
+              if (nextLine && !nextLine.startsWith("#")) {
+                streamUrls.push(nextLine.startsWith("http") ? nextLine : baseDir + nextLine);
+              }
             }
           }
-        }
-        
-        if (parsedQualities.length === 0) {
-           // Talvez já seja o link da qualidade direta
-           parsedQualities.push({ name: "Qualidade Única", url: data.url });
-        }
-        
-        setQualities(parsedQualities.reverse()); // Mais alta primeiro
-        setAppState("selecting_quality");
-      }
-      
-    } catch (error: any) {
-      setAppState("error");
-      setErrorMsg(error.message);
-    }
-  };
-
-  const startDownloadAndProcess = async (quality: Quality) => {
-    setSelectedQuality(quality);
-    setAppState("downloading");
-    setErrorMsg("");
-    setProgressPercent(0);
-    
-    try {
-      const ffmpeg = ffmpegRef.current;
-      if (!isFfmpegLoaded) {
-         setProgressText("Aguardando carregamento do motor de processamento...");
-         await loadFfmpeg();
-      }
-
-      if (mediaType === "music") {
-        setProgressText("Baixando áudio original...");
-        const res = await fetch(`/api/proxy?url=${encodeURIComponent(quality.url)}`);
-        const buffer = await res.arrayBuffer();
-        
-        setProgressText("Processando áudio...");
-        setAppState("processing");
-        
-        const extMatch = quality.url.match(/\.([a-zA-Z0-9]+)(?:\?|$)/);
-        const originalExt = extMatch ? extMatch[1] : "aac";
-
-        await ffmpeg.writeFile(`input.${originalExt}`, new Uint8Array(buffer));
-        
-        const targetFormat = quality.format || "original";
-        
-        if (targetFormat === "mp3") {
-          setProgressText("Convertendo para MP3 (320kbps)...");
-          await ffmpeg.exec(["-i", `input.${originalExt}`, "-b:a", "320k", "output.mp3"]);
-          const output = await ffmpeg.readFile("output.mp3");
-          triggerDownload(output as Uint8Array, "mp3", "audio/mpeg");
-        } else if (targetFormat === "wav") {
-          setProgressText("Convertendo para WAV (Sem Compressão)...");
-          await ffmpeg.exec(["-i", `input.${originalExt}`, "output.wav"]);
-          const output = await ffmpeg.readFile("output.wav");
-          triggerDownload(output as Uint8Array, "wav", "audio/wav");
-        } else {
-          setProgressText("Copiando áudio original...");
-          await ffmpeg.exec(["-i", `input.${originalExt}`, "-c", "copy", `output.${originalExt}`]);
-          const output = await ffmpeg.readFile(`output.${originalExt}`);
-          const mimeType = originalExt === "mp3" ? "audio/mpeg" : "audio/aac";
-          triggerDownload(output as Uint8Array, originalExt, mimeType);
-        }
-        
-      } else {
-        // Video HLS Process
-        setProgressText("Buscando playlist do vídeo...");
-        const res = await fetch(`/api/proxy?url=${encodeURIComponent(quality.url)}`);
-        const m3u8Text = await res.text();
-        const baseDir = quality.url.replace(/[^/]+\.m3u8.*$/, "");
-        
-        const lines = m3u8Text.split("\n");
-        const chunkUrls: string[] = [];
-        
-        for (let line of lines) {
-          line = line.trim();
-          if (line && !line.startsWith("#")) {
-            chunkUrls.push(line.startsWith("http") ? line : baseDir + line);
+          
+          if (streamUrls.length > 0) {
+            highestQualityUrl = streamUrls[streamUrls.length - 1];
           }
-        }
-        
-        if (chunkUrls.length === 0) throw new Error("Nenhum segmento de vídeo encontrado.");
-        
-        let localPlaylist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n";
-        
-        let completedChunks = 0;
-        const concurrency = 6; // Baixa 6 pedaços simultaneamente para ser 6x mais rápido
 
-        for (let i = 0; i < chunkUrls.length; i++) {
-          localPlaylist += `#EXTINF:5.0,\nchunk_${i}.ts\n`;
-        }
-        localPlaylist += "#EXT-X-ENDLIST\n";
+          // Busca as partes (chunks) da qualidade final
+          setItems(prev => prev.map(it => it.id === currentItem.id ? { 
+            ...it, 
+            progressText: "Mapeando pedaços do vídeo..." 
+          } : it));
 
-        for (let i = 0; i < chunkUrls.length; i += concurrency) {
-          const batch = chunkUrls.slice(i, i + concurrency);
-          await Promise.all(batch.map(async (cUrl, idx) => {
-            const globalIdx = i + idx;
-            const chunkRes = await fetch(`/api/proxy?url=${encodeURIComponent(cUrl)}`);
-            if (!chunkRes.ok) throw new Error("Falha ao baixar pedaço do vídeo.");
-            const chunkBuffer = await chunkRes.arrayBuffer();
-            await ffmpeg.writeFile(`chunk_${globalIdx}.ts`, new Uint8Array(chunkBuffer));
-            
-            completedChunks++;
-            setProgressText(`Baixando pedaços do vídeo (${completedChunks} de ${chunkUrls.length})...`);
-            setProgressPercent(Math.round((completedChunks / chunkUrls.length) * 100));
-          }));
+          const chunksRes = await fetchFast(highestQualityUrl);
+          if (!chunksRes.ok) throw new Error("Falha ao ler playlist de chunks");
+          const chunksText = await chunksRes.text();
+          const cBaseDir = highestQualityUrl.replace(/[^/]+\.m3u8.*$/, "");
+          
+          const cLines = chunksText.split("\n");
+          const chunkUrls: string[] = [];
+          for (let line of cLines) {
+            line = line.trim();
+            if (line && !line.startsWith("#")) {
+              chunkUrls.push(line.startsWith("http") ? line : cBaseDir + line);
+            }
+          }
+
+          if (chunkUrls.length === 0) throw new Error("Nenhum segmento de vídeo encontrado.");
+
+          let localPlaylist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n";
+          let completedChunks = 0;
+          const concurrency = 6; // Baixa 6 partes em paralelo
+
+          for (let k = 0; k < chunkUrls.length; k++) {
+            localPlaylist += `#EXTINF:5.0,\nchunk_${i}_${k}.ts\n`;
+          }
+          localPlaylist += "#EXT-X-ENDLIST\n";
+
+          for (let k = 0; k < chunkUrls.length; k += concurrency) {
+            const batch = chunkUrls.slice(k, k + concurrency);
+            await Promise.all(batch.map(async (cUrl, idx) => {
+              const globalIdx = k + idx;
+              const chunkRes = await fetchFast(cUrl);
+              if (!chunkRes.ok) throw new Error("Falha ao baixar parte do vídeo.");
+              const chunkBuffer = await chunkRes.arrayBuffer();
+              await ffmpeg.writeFile(`chunk_${i}_${globalIdx}.ts`, new Uint8Array(chunkBuffer));
+              
+              completedChunks++;
+              setItems(prev => prev.map(it => it.id === currentItem.id ? { 
+                ...it, 
+                progressText: `Baixando pedaços do vídeo (${completedChunks}/${chunkUrls.length})...`,
+                progressPercent: Math.round((completedChunks / chunkUrls.length) * 100)
+              } : it));
+            }));
+          }
+
+          setItems(prev => prev.map(it => it.id === currentItem.id ? { 
+            ...it, 
+            status: "processing", 
+            progressText: "Juntando pedaços sem perda de qualidade (Remuxing)..." 
+          } : it));
+
+          await ffmpeg.writeFile(`playlist_${i}.m3u8`, localPlaylist);
+
+          const outputName = `output_${i}.mp4`;
+          const ret = await ffmpeg.exec([
+            "-i", `playlist_${i}.m3u8`, 
+            "-c", "copy", 
+            "-bsf:a", "aac_adtstoasc",
+            "-movflags", "+faststart",
+            outputName
+          ]);
+
+          if (ret !== 0) throw new Error("Erro interno ao empacotar MP4.");
+
+          const outputData = await ffmpeg.readFile(outputName);
+          const blob = new Blob([outputData as any], { type: "application/octet-stream" });
+          const dUrl = URL.createObjectURL(blob);
+          const fName = `${mediaTitle}.mp4`;
+
+          setItems(prev => prev.map(it => it.id === currentItem.id ? { 
+            ...it, 
+            status: "done", 
+            downloadUrl: dUrl, 
+            filename: fName, 
+            progressText: "Pronto para salvar!" 
+          } : it));
         }
-        
-        setProgressPercent(100);
-        setAppState("processing");
-        setProgressText("Juntando pedaços (Sem perda de qualidade)... Isso usa seu processador local.");
-        
-        await ffmpeg.writeFile("playlist.m3u8", localPlaylist);
-        
-        // Apenas junta os pedaços (muxing) sem recodificar, mantendo a qualidade original 100%.
-        // Otimizamos também a indexação (faststart) e o cabeçalho de áudio para Premiere/Resolve.
-        const ret = await ffmpeg.exec([
-          "-i", "playlist.m3u8", 
-          "-c", "copy", 
-          "-bsf:a", "aac_adtstoasc",
-          "-movflags", "+faststart",
-          "output.mp4"
-        ]);
-        
-        if (ret !== 0) throw new Error("Erro interno ao juntar vídeo.");
-        
-        const output = await ffmpeg.readFile("output.mp4");
-        triggerDownload(output as Uint8Array, "mp4", "video/mp4");
+
+      } catch (err: any) {
+        setItems(prev => prev.map(it => it.id === currentItem.id ? { 
+          ...it, 
+          status: "error", 
+          error: err.message || "Erro de processamento" 
+        } : it));
       }
-      
-      setAppState("done");
-      setProgressText("Download concluído com sucesso!");
-      
-    } catch (error: any) {
-      setAppState("error");
-      setErrorMsg(error.message);
     }
+
+    setIsBatchProcessing(false);
   };
 
-  const triggerDownload = (data: Uint8Array, extension: string, mime: string) => {
-    const filename = `${mediaTitle}.${extension}`;
-    // Usando application/octet-stream para forçar o Safari a respeitar o nome/extensão do arquivo no download
-    const blob = new Blob([data as any], { type: "application/octet-stream" });
-    const url = URL.createObjectURL(blob);
-    setDownloadFilename(filename);
-    setDownloadUrl(url);
-    // Removemos o a.click() automático, deixaremos o usuário clicar no botão "Baixar Arquivo" no UI.
-  };
+  const hasLinks = items.some(it => it.url.trim() !== "");
 
   return (
-    <main className="min-h-screen bg-[#0a0a0a] flex flex-col items-center justify-center p-4 selection:bg-[#dfff00] selection:text-black">
+    <main className="min-h-screen bg-[#0a0a0a] flex flex-col items-center justify-start p-4 md:p-8 selection:bg-[#dfff00] selection:text-black">
       
       {/* HEADER */}
-      <div className="text-center mb-12">
-        <h1 className="text-5xl md:text-6xl font-black mb-4 tracking-tight">
+      <div className="text-center mt-6 mb-10">
+        <h1 className="text-5xl md:text-6xl font-black mb-3 tracking-tight">
           <span className="text-[#dfff00]">ART</span>
           <span className="text-gray-600 mx-1">//</span>
           <span className="text-[#dfff00]">LOADER</span>
         </h1>
         <p className="text-[#555] tracking-[0.25em] text-[10px] md:text-xs font-mono uppercase">
-          Artlist Footage & Music Downloader
+          Downloader Universal · Múltiplos Links Simultâneos
         </p>
       </div>
 
-      {/* MAIN PANEL */}
-      <div className="border border-[#222] bg-[#111] p-6 md:p-10 w-full max-w-3xl shadow-2xl">
+      {/* CONTROLS & BATCH PANEL */}
+      <div className="border border-[#222] bg-[#111] p-5 md:p-8 w-full max-w-4xl shadow-2xl rounded-sm">
         
-        {/* INPUT STATE */}
-        {(appState === "idle" || appState === "extracting" || appState === "error") && (
+        {/* GLOBAL OPTIONS BAR */}
+        <div className="mb-8 p-4 bg-[#0d0d0d] border border-[#222] flex flex-col md:flex-row items-center justify-between gap-4">
           <div>
-            <label className="block text-[#555] text-[10px] md:text-xs font-mono uppercase mb-3 tracking-widest">
-              URL do Artlist
-            </label>
-            <div className="flex flex-col md:flex-row border border-[#333] focus-within:border-[#555] transition-colors">
-              <input
-                type="url"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://artlist.io/stock-footage/clip/..."
-                className="flex-1 bg-[#0a0a0a] text-gray-300 font-mono text-sm px-5 py-4 outline-none w-full"
-                disabled={appState === "extracting"}
-              />
+            <span className="block text-gray-400 font-mono text-[11px] uppercase tracking-wider mb-1">
+              Formato Global de Saída (Músicas)
+            </span>
+            <p className="text-[#555] text-[10px] font-mono">Vídeos sempre saem em MP4 com Qualidade Máxima Original</p>
+          </div>
+          
+          <div className="flex gap-2">
+            {(["mp3", "wav", "original"] as const).map(fmt => (
               <button
-                onClick={handleExtract}
-                disabled={!url || appState === "extracting"}
-                className={`px-8 py-4 text-sm font-bold tracking-[0.1em] uppercase flex items-center justify-center transition-all ${
-                  !url
-                    ? "bg-[#222] text-[#555] cursor-not-allowed"
-                    : appState === "extracting"
-                    ? "bg-[#dfff00]/50 text-black cursor-wait"
-                    : "bg-[#dfff00] text-black hover:bg-[#bfff00]"
+                key={fmt}
+                onClick={() => setGlobalMusicFormat(fmt)}
+                className={`px-4 py-2 font-mono text-xs uppercase tracking-widest transition-all border ${
+                  globalMusicFormat === fmt
+                    ? "border-[#dfff00] bg-[#dfff00]/10 text-[#dfff00]"
+                    : "border-[#333] text-gray-500 hover:border-[#555] hover:text-gray-300"
                 }`}
               >
-                {appState === "extracting" ? "AGUARDE..." : "ANALISAR"}
+                {fmt === "original" ? "AAC Original" : fmt}
               </button>
-            </div>
-            
-            {appState === "error" && (
-              <div className="mt-4 p-4 border border-red-500/30 bg-red-500/10 text-red-400 font-mono text-xs flex gap-3">
-                <span>[ERRO]</span> {errorMsg}
+            ))}
+          </div>
+        </div>
+
+        {/* LINKS LIST */}
+        <div className="space-y-4 mb-8">
+          <div className="flex items-center justify-between border-b border-[#222] pb-3 px-1">
+            <span className="text-[#555] font-mono text-xs uppercase tracking-widest">Lista de Mídias ({items.length})</span>
+            <button 
+              onClick={() => setItems([{ id: "1", url: "", status: "idle" }])}
+              className="text-[#555] hover:text-red-400 font-mono text-[10px] uppercase tracking-widest transition-colors"
+            >
+              [ Limpar Tudo ]
+            </button>
+          </div>
+
+          {items.map((item, idx) => (
+            <div 
+              key={item.id} 
+              className={`p-4 border transition-all ${
+                item.status === "done" 
+                  ? "border-green-500/30 bg-green-500/5" 
+                  : item.status === "error"
+                  ? "border-red-500/30 bg-red-500/5"
+                  : item.status !== "idle"
+                  ? "border-[#dfff00]/30 bg-[#dfff00]/5"
+                  : "border-[#222] bg-[#0a0a0a]"
+              }`}
+            >
+              <div className="flex flex-col md:flex-row gap-2 items-stretch md:items-center">
+                <span className="text-[#555] font-mono text-xs px-2 py-1 bg-[#111] border border-[#222] text-center self-start md:self-auto">
+                  #{idx + 1}
+                </span>
+
+                <input
+                  type="url"
+                  value={item.url}
+                  onChange={(e) => updateUrl(item.id, e.target.value)}
+                  placeholder="Cole a URL do Artlist aqui (música, SFX ou vídeo)..."
+                  disabled={isBatchProcessing && item.status !== "idle" && item.status !== "error"}
+                  className="flex-1 bg-[#050505] border border-[#222] focus:border-[#dfff00] text-gray-300 font-mono text-xs px-4 py-3 outline-none transition-colors disabled:opacity-50"
+                />
+
+                <div className="flex gap-2 self-end md:self-auto w-full md:w-auto justify-end">
+                  {item.downloadUrl && item.status === "done" && (
+                    <a
+                      href={item.downloadUrl}
+                      download={item.filename || "download"}
+                      className="px-4 py-3 bg-[#dfff00] hover:bg-[#bfff00] text-black font-bold font-mono text-xs uppercase tracking-wider flex items-center gap-2 transition-all shadow-lg animate-in fade-in"
+                    >
+                      <Download size={14} /> Salvar
+                    </a>
+                  )}
+
+                  <button
+                    onClick={() => removeLinkBox(item.id)}
+                    disabled={isBatchProcessing && item.status !== "idle" && item.status !== "error"}
+                    title="Deletar Link"
+                    className="p-3 bg-[#161616] border border-[#222] hover:border-red-500 hover:text-red-400 text-[#555] transition-colors disabled:opacity-50"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
               </div>
-            )}
-          </div>
-        )}
 
-        {/* QUALITY SELECTION */}
-        {appState === "selecting_quality" && (
-          <div className="animate-in fade-in duration-300">
-            <div className="mb-6 flex items-center justify-between border-b border-[#222] pb-4">
-              <p className="text-[#555] text-xs font-mono uppercase tracking-widest">
-                {mediaType === "music" ? "Áudio Pronto" : "Selecione a Qualidade"}
-              </p>
-              <button onClick={() => setAppState("idle")} className="text-[#555] hover:text-white font-mono text-xs uppercase tracking-widest">
-                [ VOLTAR ]
-              </button>
-            </div>
-            
-            <div className="grid gap-2">
-              {qualities.map((q, idx) => (
-                <button
-                  key={idx}
-                  onClick={() => startDownloadAndProcess(q)}
-                  className="flex items-center justify-between p-4 border border-[#333] bg-[#0a0a0a] hover:border-[#dfff00] hover:text-[#dfff00] group transition-all text-left"
-                >
-                  <span className="font-mono text-sm text-gray-300 group-hover:text-[#dfff00]">
-                    &gt; {q.name} {q.resolution && `(${q.resolution})`}
-                  </span>
-                  <span className="font-mono text-xs text-[#555] group-hover:text-[#dfff00]">
-                    [ BAIXAR ]
-                  </span>
-                </button>
-              ))}
-              {qualities.length === 0 && mediaType === "music" && selectedQuality && (
-                <button
-                  onClick={() => startDownloadAndProcess(selectedQuality)}
-                  className="flex items-center justify-between p-4 border border-[#333] bg-[#0a0a0a] hover:border-[#dfff00] hover:text-[#dfff00] group transition-all text-left"
-                >
-                  <span className="font-mono text-sm text-gray-300 group-hover:text-[#dfff00]">
-                    &gt; ÁUDIO ORIGINAL
-                  </span>
-                  <span className="font-mono text-xs text-[#555] group-hover:text-[#dfff00]">
-                    [ BAIXAR ]
-                  </span>
-                </button>
-              )}
-            </div>
-          </div>
-        )}
+              {/* PROGRESS STATUS BAR */}
+              {item.status !== "idle" && (
+                <div className="mt-3 pt-3 border-t border-[#1a1a1a] flex items-center justify-between gap-4 font-mono text-xs">
+                  <div className="flex items-center gap-2 overflow-hidden">
+                    {item.status === "analyzing" || item.status === "downloading" || item.status === "processing" ? (
+                      <Loader2 size={14} className="text-[#dfff00] animate-spin shrink-0" />
+                    ) : item.status === "done" ? (
+                      <CheckCircle size={14} className="text-green-400 shrink-0" />
+                    ) : (
+                      <AlertCircle size={14} className="text-red-400 shrink-0" />
+                    )}
 
-        {/* PROCESSING / DONE */}
-        {(appState === "downloading" || appState === "processing" || appState === "done") && (
-          <div className="py-4 animate-in fade-in duration-300 font-mono">
-            <div className="mb-8 border border-[#222] bg-[#0a0a0a] p-4">
-              <p className="text-xs text-[#555] mb-2 uppercase tracking-widest">Status da Operação</p>
-              <p className={`text-sm ${appState === "done" ? "text-[#dfff00]" : "text-gray-300"}`}>
-                &gt; {progressText}
-              </p>
-              
-              {appState === "downloading" && (
-                <div className="mt-4 flex items-center gap-4">
-                  <div className="flex-1 h-1 bg-[#222]">
-                    <div 
-                      className="h-full bg-[#dfff00] transition-all duration-100"
-                      style={{ width: `${progressPercent}%` }}
-                    />
+                    <span className={`truncate ${
+                      item.status === "done" 
+                        ? "text-green-400" 
+                        : item.status === "error" 
+                        ? "text-red-400" 
+                        : "text-gray-400"
+                    }`}>
+                      {item.title ? `[${item.title}] ` : ""}{item.progressText || item.error}
+                    </span>
                   </div>
-                  <span className="text-[#dfff00] text-xs">[{progressPercent}%]</span>
+
+                  {item.status === "downloading" && item.progressPercent !== undefined && (
+                    <div className="flex items-center gap-2 shrink-0">
+                      <div className="w-20 md:w-32 h-1 bg-[#222] hidden md:block">
+                        <div 
+                          className="h-full bg-[#dfff00] transition-all duration-100" 
+                          style={{ width: `${item.progressPercent}%` }} 
+                        />
+                      </div>
+                      <span className="text-[#dfff00] text-[10px]">[{item.progressPercent}%]</span>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
+          ))}
+        </div>
 
-            {appState === "done" && (
-              <div className="flex flex-col md:flex-row gap-4 mt-6">
-                {downloadUrl && (
-                  <a
-                    href={downloadUrl}
-                    download={downloadFilename}
-                    className="flex-1 text-center py-4 bg-[#dfff00] hover:bg-[#bfff00] text-black font-bold uppercase text-sm tracking-widest transition-colors"
-                  >
-                    SALVAR ({downloadFilename})
-                  </a>
-                )}
-                <button
-                  onClick={() => {
-                    setUrl("");
-                    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
-                    setDownloadUrl(null);
-                    setAppState("idle");
-                  }}
-                  className="px-8 py-4 border border-[#333] hover:border-gray-500 text-gray-400 hover:text-white uppercase text-sm tracking-widest transition-colors"
-                >
-                  NOVO ARQUIVO
-                </button>
-              </div>
+        {/* BOTTOM GLOBAL BUTTONS */}
+        <div className="flex flex-col md:flex-row gap-4 pt-4 border-t border-[#222]">
+          <button
+            onClick={addLinkBox}
+            disabled={isBatchProcessing}
+            className="flex-1 py-4 border border-[#333] hover:border-[#dfff00] bg-[#0a0a0a] text-gray-400 hover:text-[#dfff00] font-mono text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-all disabled:opacity-50"
+          >
+            <Plus size={16} /> Adicionar Mais Link
+          </button>
+
+          <button
+            onClick={startBatchProcess}
+            disabled={!hasLinks || isBatchProcessing}
+            className={`flex-1 py-4 font-bold font-mono text-xs uppercase tracking-widest flex items-center justify-center gap-3 transition-all shadow-xl ${
+              !hasLinks
+                ? "bg-[#1a1a1a] text-[#444] border border-[#222] cursor-not-allowed"
+                : isBatchProcessing
+                ? "bg-[#dfff00]/30 text-[#dfff00] cursor-wait border border-[#dfff00]"
+                : "bg-[#dfff00] text-black hover:bg-[#bfff00]"
+            }`}
+          >
+            {isBatchProcessing ? (
+              <>
+                <Loader2 size={16} className="animate-spin" /> Processando Fila...
+              </>
+            ) : (
+              <>
+                <Play size={16} fill="currentColor" /> Processar e Baixar Todos
+              </>
             )}
-          </div>
-        )}
+          </button>
+        </div>
+
       </div>
 
-      <div className="mt-12 text-center text-[#444] font-mono text-[10px] md:text-xs tracking-[0.2em] uppercase">
-        transcodificação no seu navegador · ffmpeg.wasm
+      {/* FOOTER */}
+      <div className="mt-8 text-center text-[#444] font-mono text-[10px] md:text-xs tracking-[0.2em] uppercase">
+        Processamento Sequencial Seguro em Nuvem · FFmpeg.wasm
       </div>
     </main>
   );
