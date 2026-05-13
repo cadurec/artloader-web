@@ -87,7 +87,7 @@ export async function POST(req: Request) {
        return NextResponse.json({ type: isFootage ? "footage" : "music", url, title });
     }
 
-    let htmlText = "";
+    let extractedMedia: any = null;
     
     // 1. TENTATIVA DIRETA ULTRA RÁPIDA (Vercel / Localhost):
     // Faz um fetch limpo de altíssima velocidade fingindo ser um navegador real. Se o Cloudflare deixar passar, a resposta vem em 200 a 300 milissegundos!
@@ -109,14 +109,17 @@ export async function POST(req: Request) {
         const text = await fastRes.text();
         // Garante que o texto retornado é o site real do Artlist e não uma página de desafio/bloqueio do Cloudflare
         if (!text.includes("Just a moment...") && !text.includes("cf-turnstile") && text.includes("artlist")) {
-          htmlText = text;
+          extractedMedia = parseMediaFromHtml(text, title);
+          if (extractedMedia) {
+            return NextResponse.json(extractedMedia);
+          }
         }
       }
     } catch (e) {}
 
     // 2. PLANO B DE EMERGÊNCIA (API Oxylabs):
-    // Só entra se a tentativa direta da Vercel foi interceptada pelo Cloudflare
-    if (!htmlText || htmlText.length < 50000) {
+    // Só entra se a tentativa direta da Vercel foi interceptada pelo Cloudflare ou não revelou a mídia real
+    if (!extractedMedia) {
       try {
         const authStr = process.env.OXYLABS_AUTH || "cadurec_Nc4pf:tT5WJ56H6mXfD28";
         const oxyAuth = Buffer.from(authStr).toString("base64");
@@ -135,15 +138,13 @@ export async function POST(req: Request) {
         if (oxyRes.ok) {
           const oxyData = await oxyRes.json();
           if (oxyData.results && oxyData.results[0] && oxyData.results[0].content) {
-            htmlText = oxyData.results[0].content;
+            extractedMedia = parseMediaFromHtml(oxyData.results[0].content, title);
+            if (extractedMedia) {
+              return NextResponse.json(extractedMedia);
+            }
           }
         }
       } catch (e) {}
-    }
-
-    if (htmlText) {
-      const result = parseMediaFromHtml(htmlText, title);
-      if (result) return NextResponse.json(result);
     }
 
     return NextResponse.json({ error: "Mídia não encontrada no código-fonte estático. Verifique o link." }, { status: 404 });
