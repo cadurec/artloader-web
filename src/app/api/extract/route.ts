@@ -137,7 +137,7 @@ export async function POST(req: Request) {
     // 2. PLANO B DE EMERGÊNCIA (API Oxylabs):
     if (!extractedMedia) {
       try {
-        const authStr = process.env.OXYLABS_AUTH || "cadurec_Nc4pf:tT5WJ56H6mXfD28";
+        const authStr = process.env.OXYLABS_AUTH || "cadurec_Nc4pf:+Caduocara33";
         const oxyAuth = Buffer.from(authStr).toString("base64");
         const oxyRes = await fetch("https://realtime.oxylabs.io/v1/queries", {
           method: "POST",
