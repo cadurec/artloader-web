@@ -89,37 +89,37 @@ export async function POST(req: Request) {
 
     let htmlText = "";
     
-    // No localhost (desenvolvimento), tenta a busca local estática grátis primeiro porque não consome seus créditos
-    if (process.env.NODE_ENV === "development") {
-      try {
-        htmlText = await new Promise<string>((resolve, reject) => {
-          const parsedUrl = new URL(url);
-          const request = https.get({
-            hostname: parsedUrl.hostname,
-            path: parsedUrl.pathname + parsedUrl.search,
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
-              'Accept-Language': 'en-US,en;q=0.9'
-            }
-          }, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => resolve(data));
-          });
-          
-          request.on('error', reject);
-          request.setTimeout(2000, () => {
-            request.destroy();
-            reject(new Error("Timeout"));
-          });
-        });
-      } catch (e) {}
-    }
+    // 1. TENTATIVA DIRETA ULTRA RÁPIDA (Vercel / Localhost):
+    // Faz um fetch limpo de altíssima velocidade fingindo ser um navegador real. Se o Cloudflare deixar passar, a resposta vem em 200 a 300 milissegundos!
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2000); // Desiste rapidamente em 2 segundos para não prender a fila
+      
+      const fastRes = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.5"
+        },
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
 
-    // Em Produção no Render, PULA DIRETO PRA API DO OXYLABS NO MILISSEGUNDO ZERO! Sem espera!
-    if (!htmlText || htmlText.length < 80000) {
+      if (fastRes.ok) {
+        const text = await fastRes.text();
+        // Garante que o texto retornado é o site real do Artlist e não uma página de desafio/bloqueio do Cloudflare
+        if (!text.includes("Just a moment...") && !text.includes("cf-turnstile") && text.includes("artlist")) {
+          htmlText = text;
+        }
+      }
+    } catch (e) {}
+
+    // 2. PLANO B DE EMERGÊNCIA (API Oxylabs):
+    // Só entra se a tentativa direta da Vercel foi interceptada pelo Cloudflare
+    if (!htmlText || htmlText.length < 50000) {
       try {
-        const oxyAuth = Buffer.from("cadurec_Nc4pf:+Caduocara33").toString("base64");
+        const authStr = process.env.OXYLABS_AUTH || "cadurec_Nc4pf:tT5WJ56H6mXfD28";
+        const oxyAuth = Buffer.from(authStr).toString("base64");
         const oxyRes = await fetch("https://realtime.oxylabs.io/v1/queries", {
           method: "POST",
           headers: {
