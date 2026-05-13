@@ -112,12 +112,37 @@ export async function POST(req: Request) {
       });
     } catch (e) {}
 
-    // Fallback com curl avançado simulando requisição completa para maximizar bypass de proteção no Render
+    // Fallback 1: curl nativo avançado
     if (!htmlText || htmlText.length < 80000) {
       try {
         const curlCmd = `curl -s -A "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1" -H "Accept-Language: en-US,en;q=0.9" --compressed "${url}"`;
         const { stdout } = await execAsync(curlCmd);
         if (stdout) htmlText = stdout;
+      } catch (e) {}
+    }
+
+    // Fallback 2 Máximo: Oxylabs Web Scraper API (Garante acesso ao HTML estático contornando o Cloudflare no Render)
+    if (!htmlText || htmlText.length < 80000) {
+      try {
+        const oxyAuth = Buffer.from("cadurec_Nc4pf:+Caduocara33").toString("base64");
+        const oxyRes = await fetch("https://realtime.oxylabs.io/v1/queries", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Basic ${oxyAuth}`
+          },
+          body: JSON.stringify({
+            source: "universal",
+            url: url
+          })
+        });
+        
+        if (oxyRes.ok) {
+          const oxyData = await oxyRes.json();
+          if (oxyData.results && oxyData.results[0] && oxyData.results[0].content) {
+            htmlText = oxyData.results[0].content;
+          }
+        }
       } catch (e) {}
     }
 
