@@ -330,6 +330,7 @@ export default function Home() {
         setItems(prev => prev.map(it => it.id === currentItem.id ? { 
           ...it, 
           status: "error", 
+          progressText: undefined,
           error: err.message || "Erro de processamento" 
         } : it));
       }
@@ -461,7 +462,7 @@ export default function Home() {
                         ? "text-red-400" 
                         : "text-gray-400"
                     }`}>
-                      {item.title ? `[${item.title}] ` : ""}{item.progressText || item.error}
+                      {item.title && item.status !== "error" ? `[${item.title}] ` : ""}{item.status === "error" ? item.error : item.progressText}
                     </span>
                   </div>
 
