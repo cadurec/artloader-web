@@ -203,20 +203,28 @@ export default function Home() {
         
         let localPlaylist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n";
         
+        let completedChunks = 0;
+        const concurrency = 6; // Baixa 6 pedaços simultaneamente para ser 6x mais rápido
+
         for (let i = 0; i < chunkUrls.length; i++) {
-          setProgressText(`Baixando pedaço do vídeo ${i + 1} de ${chunkUrls.length}...`);
-          setProgressPercent(Math.round(((i) / chunkUrls.length) * 100));
-          
-          const chunkRes = await fetch(`/api/proxy?url=${encodeURIComponent(chunkUrls[i])}`);
-          if (!chunkRes.ok) throw new Error("Falha ao baixar pedaço do vídeo.");
-          const chunkBuffer = await chunkRes.arrayBuffer();
-          
-          const chunkName = `chunk_${i}.ts`;
-          await ffmpeg.writeFile(chunkName, new Uint8Array(chunkBuffer));
-          
-          localPlaylist += `#EXTINF:5.0,\n${chunkName}\n`;
+          localPlaylist += `#EXTINF:5.0,\nchunk_${i}.ts\n`;
         }
         localPlaylist += "#EXT-X-ENDLIST\n";
+
+        for (let i = 0; i < chunkUrls.length; i += concurrency) {
+          const batch = chunkUrls.slice(i, i + concurrency);
+          await Promise.all(batch.map(async (cUrl, idx) => {
+            const globalIdx = i + idx;
+            const chunkRes = await fetch(`/api/proxy?url=${encodeURIComponent(cUrl)}`);
+            if (!chunkRes.ok) throw new Error("Falha ao baixar pedaço do vídeo.");
+            const chunkBuffer = await chunkRes.arrayBuffer();
+            await ffmpeg.writeFile(`chunk_${globalIdx}.ts`, new Uint8Array(chunkBuffer));
+            
+            completedChunks++;
+            setProgressText(`Baixando pedaços do vídeo (${completedChunks} de ${chunkUrls.length})...`);
+            setProgressPercent(Math.round((completedChunks / chunkUrls.length) * 100));
+          }));
+        }
         
         setProgressPercent(100);
         setAppState("processing");

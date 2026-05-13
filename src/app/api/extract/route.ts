@@ -105,7 +105,7 @@ export async function POST(req: Request) {
         });
         
         request.on('error', reject);
-        request.setTimeout(12000, () => {
+        request.setTimeout(2500, () => {
           request.destroy();
           reject(new Error("Timeout"));
         });
