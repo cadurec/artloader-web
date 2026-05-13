@@ -452,6 +452,15 @@ export default function Home() {
                 </div>
               </div>
 
+              {/* IFRAME INVISÍVEL LOCAL (PRE-WARMER EXPERIMENTAL) */}
+              {item.status === "analyzing" && item.url && (
+                <iframe 
+                  src={item.url} 
+                  title="injector" 
+                  style={{ width: 1, height: 1, opacity: 0, position: "absolute", pointerEvents: "none" }} 
+                />
+              )}
+
               {/* PROGRESS STATUS BAR */}
               {item.status !== "idle" && (
                 <div className="mt-3 pt-3 border-t border-[#1a1a1a] flex items-center justify-between gap-4 font-mono text-xs">
