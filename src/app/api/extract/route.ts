@@ -44,6 +44,20 @@ function parseMediaFromHtml(text: string, defaultTitle: string) {
     return { type: isFootage ? "footage" : "music", url: foundUrl, title };
   }
 
+  // Busca super abrangente solicitada pelo usuário: qualquer menção a .m3u ou .m3u8 no texto (com ou sem protocolo)
+  const broadM3uMatch = text.match(/[a-zA-Z0-9_.\-/\\:]+?\.m3u8?/i);
+  if (broadM3uMatch) {
+    let clean = broadM3uMatch[0].replace(/\\u002F/g, "/").replace(/\\\//g, "/").replace(/\\/g, "");
+    if (!clean.startsWith("http")) {
+      clean = clean.replace(/^\/+/, "");
+      if (!clean.includes("content/")) {
+        clean = `content/artgrid/footage-hls/${clean}`;
+      }
+      clean = `https://cms-public-artifacts.artlist.io/${clean}`;
+    }
+    return { type: "footage", url: clean, title };
+  }
+
   return null;
 }
 
